@@ -42,6 +42,9 @@ final class PqHandle implements Handle
     /** @var int */
     private $lastUsedAt;
 
+    /** @var bool */
+    private $ready = true;
+
     /**
      * Connection constructor.
      *
@@ -56,8 +59,12 @@ final class PqHandle implements Handle
         $lastUsedAt = &$this->lastUsedAt;
         $deferred = &$this->deferred;
         $listeners = &$this->listeners;
+        $busy = &$this->busy;
+        $ready = &$this->ready;
 
-        $this->poll = Loop::onReadable($this->handle->socket, static function ($watcher) use (&$deferred, &$lastUsedAt, &$listeners, &$handle): void {
+        $this->poll = Loop::onReadable($this->handle->socket, static function ($watcher) use (
+            &$deferred, &$lastUsedAt, &$listeners, &$handle, &$busy, &$ready
+        ): void {
             $lastUsedAt = \time();
 
             if ($handle->poll() === pq\Connection::POLLING_FAILED) {
@@ -82,6 +89,12 @@ final class PqHandle implements Handle
 
             if ($handle->busy) {
                 return; // Not finished receiving data, poll again.
+            }
+
+            if ($busy && $ready) {
+                $temp = $busy;
+                $busy = null;
+                $temp->resolve();
             }
 
             $deferred->resolve($handle->getResult());
@@ -189,6 +202,7 @@ final class PqHandle implements Handle
 
         try {
             $this->deferred = $this->busy = new Deferred;
+            $this->ready = false;
 
             $handle = $method(...$args);
 
@@ -224,12 +238,12 @@ final class PqHandle implements Handle
 
             case pq\Result::SINGLE_TUPLE:
                 $this->busy = new Deferred;
-                $result = new PqUnbufferedResultSet(
+                $this->ready = false;
+                return new PqUnbufferedResultSet(
                     coroutine(\Closure::fromCallable([$this, 'fetch'])),
                     $result,
                     \Closure::fromCallable([$this, 'release'])
                 );
-                return $result;
 
             case pq\Result::NONFATAL_ERROR:
             case pq\Result::FATAL_ERROR:
@@ -288,6 +302,12 @@ final class PqHandle implements Handle
             $this->busy instanceof Deferred && $this->busy !== $this->deferred,
             "Connection in invalid state when releasing"
         );
+
+        $this->ready = true;
+
+        if ($this->handle->busy) {
+            return;
+        }
 
         $deferred = $this->busy;
         $this->busy = null;
