@@ -43,7 +43,7 @@ final class PqHandle implements Handle
     private $lastUsedAt;
 
     /** @var bool */
-    private $ready = true;
+    private $ready = false;
 
     /**
      * Connection constructor.
@@ -91,15 +91,16 @@ final class PqHandle implements Handle
                 return; // Not finished receiving data, poll again.
             }
 
+            $deferred->resolve($handle->getResult());
+
             if ($busy && $ready) {
                 $temp = $busy;
                 $busy = null;
+                $ready = false;
                 $temp->resolve();
             }
 
-            $deferred->resolve($handle->getResult());
-
-            if (!$deferred && empty($listeners)) {
+            if (!$deferred && !$busy && empty($listeners)) {
                 Loop::unreference($watcher);
             }
         });
@@ -202,7 +203,6 @@ final class PqHandle implements Handle
 
         try {
             $this->deferred = $this->busy = new Deferred;
-            $this->ready = false;
 
             $handle = $method(...$args);
 
@@ -303,9 +303,8 @@ final class PqHandle implements Handle
             "Connection in invalid state when releasing"
         );
 
-        $this->ready = true;
-
         if ($this->handle->busy) {
+            $this->ready = true;
             return;
         }
 
