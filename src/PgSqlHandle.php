@@ -30,6 +30,9 @@ final class PgSqlHandle implements Handle
         \PGSQL_DIAG_SOURCE_FUNCTION => "source_function",
     ];
 
+    /** @var Promise<array<int, array{bool, string}>> */
+    private static $types;
+
     /** @var resource PostgreSQL connection handle. */
     private $handle;
 
@@ -150,6 +153,10 @@ final class PgSqlHandle implements Handle
         //Loop::disable($this->poll);
         Loop::unreference($this->poll);
         Loop::disable($this->await);
+
+        if (!isset(self::$types)) {
+            self::$types = $this->fetchTypes();
+        }
     }
 
     /**
@@ -158,6 +165,23 @@ final class PgSqlHandle implements Handle
     public function __destruct()
     {
         $this->close();
+    }
+
+    private function fetchTypes(): Promise
+    {
+        return call(function (): \Generator {
+            $result = yield from $this->send(
+                "pg_send_query",
+                "SELECT oid, typcategory, typdelim FROM pg_catalog.pg_type"
+            );
+
+            $types = [];
+            while ($row = \pg_fetch_array($result, null, \PGSQL_NUM)) {
+                [$oid, $type, $delimiter] = $row;
+                $types[(int) $oid] = [$type, $delimiter];
+            }
+            return $types;
+        });
     }
 
     /**
@@ -257,7 +281,7 @@ final class PgSqlHandle implements Handle
      * @throws FailureException
      * @throws QueryError
      */
-    private function createResult($result, string $sql)
+    private function createResult($result, string $sql, array $types)
     {
         switch (\pg_result_status($result, \PGSQL_STATUS_LONG)) {
             case \PGSQL_EMPTY_QUERY:
@@ -267,7 +291,7 @@ final class PgSqlHandle implements Handle
                 return new PgSqlCommandResult($result);
 
             case \PGSQL_TUPLES_OK:
-                return new PgSqlResultSet($result);
+                return new PgSqlResultSet($result, $types);
 
             case \PGSQL_NONFATAL_ERROR:
             case \PGSQL_FATAL_ERROR:
@@ -301,7 +325,11 @@ final class PgSqlHandle implements Handle
     {
         return call(function () use ($name, $params) {
             \assert(isset($this->statements[$name]), "Named statement not found when executing");
-            return $this->createResult(yield from $this->send("pg_send_execute", $name, $params), $this->statements[$name]->sql);
+            return $this->createResult(
+                yield from $this->send("pg_send_execute", $name, $params),
+                $this->statements[$name]->sql,
+                yield self::$types
+            );
         });
     }
 
@@ -341,7 +369,7 @@ final class PgSqlHandle implements Handle
         }
 
         return call(function () use ($sql) {
-            return $this->createResult(yield from $this->send("pg_send_query", $sql), $sql);
+            return $this->createResult(yield from $this->send("pg_send_query", $sql), $sql, yield self::$types);
         });
     }
 
@@ -358,7 +386,11 @@ final class PgSqlHandle implements Handle
         $params = Internal\replaceNamedParams($params, $names);
 
         return call(function () use ($sql, $params) {
-            return $this->createResult(yield from $this->send("pg_send_query_params", $sql, $params), $sql);
+            return $this->createResult(
+                yield from $this->send("pg_send_query_params", $sql, $params),
+                $sql,
+                yield self::$types
+            );
         });
     }
 
