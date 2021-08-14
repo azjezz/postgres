@@ -30,13 +30,16 @@ final class PgSqlHandle implements Handle
         \PGSQL_DIAG_SOURCE_FUNCTION => "source_function",
     ];
 
-    /** @var Promise<array<int, array{bool, string}>> */
-    private static $types;
+    /** @var array<string, Promise<array<int, array{string, string}>>> */
+    private static $type_cache;
 
     /** @var resource PostgreSQL connection handle. */
     private $handle;
 
-    /** @var \Amp\Deferred|null */
+    /** @var Promise<array<int, array{string, string}>> */
+    private $types;
+
+    /** @var Deferred|null */
     private $deferred;
 
     /** @var string */
@@ -45,7 +48,7 @@ final class PgSqlHandle implements Handle
     /** @var string */
     private $await;
 
-    /** @var \Amp\Emitter[] */
+    /** @var Emitter[] */
     private $listeners = [];
 
     /** @var Struct[] */
@@ -55,8 +58,6 @@ final class PgSqlHandle implements Handle
     private $lastUsedAt;
 
     /**
-     * Connection constructor.
-     *
      * @param resource $handle PostgreSQL connection handle.
      * @param resource $socket PostgreSQL connection stream socket.
      */
@@ -154,9 +155,7 @@ final class PgSqlHandle implements Handle
         Loop::unreference($this->poll);
         Loop::disable($this->await);
 
-        if (!isset(self::$types)) {
-            self::$types = $this->fetchTypes();
-        }
+        $this->types = $this->lookupTypesTable();
     }
 
     /**
@@ -167,7 +166,32 @@ final class PgSqlHandle implements Handle
         $this->close();
     }
 
-    private function fetchTypes(): Promise
+    private function lookupTypesTable(): Promise
+    {
+        return call(function (): \Generator {
+            $result = yield from $this->send(
+                "pg_send_query",
+                "SELECT CURRENT_USER, inet_server_addr(), inet_server_port()"
+            );
+
+            $row = \pg_fetch_array($result, null, \PGSQL_NUM);
+            if ($row === false) {
+                $this->close();
+                throw new ConnectionException("Could not query connection metadata");
+            }
+
+            [$user, $host, $port] = $row;
+            $hash = \sha1($user . $host . $port);
+
+            if (isset(self::$type_cache[$hash])) {
+                return self::$type_cache[$hash];
+            }
+
+            return (self::$type_cache[$hash] = $this->fetchTypesTable());
+        });
+    }
+
+    private function fetchTypesTable(): Promise
     {
         return call(function (): \Generator {
             $result = yield from $this->send(
@@ -328,7 +352,7 @@ final class PgSqlHandle implements Handle
             return $this->createResult(
                 yield from $this->send("pg_send_execute", $name, $params),
                 $this->statements[$name]->sql,
-                yield self::$types
+                yield $this->types
             );
         });
     }
@@ -369,7 +393,7 @@ final class PgSqlHandle implements Handle
         }
 
         return call(function () use ($sql) {
-            return $this->createResult(yield from $this->send("pg_send_query", $sql), $sql, yield self::$types);
+            return $this->createResult(yield from $this->send("pg_send_query", $sql), $sql, yield $this->types);
         });
     }
 
@@ -389,7 +413,7 @@ final class PgSqlHandle implements Handle
             return $this->createResult(
                 yield from $this->send("pg_send_query_params", $sql, $params),
                 $sql,
-                yield self::$types
+                yield $this->types
             );
         });
     }

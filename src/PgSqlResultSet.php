@@ -11,7 +11,7 @@ final class PgSqlResultSet implements ResultSet
     /** @var resource PostgreSQL result resource. */
     private $handle;
 
-    /** @var array<int, array{bool, string}> */
+    /** @var array<int, array{string, string}> */
     private $types;
 
     /** @var int */
@@ -31,9 +31,9 @@ final class PgSqlResultSet implements ResultSet
 
     /**
      * @param resource $handle PostgreSQL result resource.
-     * @param array<int, array{bool, string}> $types
+     * @param array<int, array{string, string}> $types
      */
-    public function __construct($handle, array $types)
+    public function __construct($handle, array $types = [])
     {
         $this->handle = $handle;
         $this->types = $types;
@@ -103,7 +103,7 @@ final class PgSqlResultSet implements ResultSet
     }
 
     /**
-     * @see https://github.com/postgres/postgres/blob/REL_10_STABLE/src/include/catalog/pg_type.h for OID types.
+     * @see https://github.com/postgres/postgres/blob/REL_14_STABLE/src/include/catalog/pg_type.dat for OID types.
      *
      * @param int $column
      * @param string $value
@@ -154,7 +154,7 @@ final class PgSqlResultSet implements ResultSet
                 });
 
             default:
-                [$type, $delimiter] = $this->types[$oid] ?? [false, ','];
+                [$type, $delimiter] = $this->types[$oid] ?? ['S', ','];
 
                 if ($type === 'A') {
                     return $this->parser->parse($value, null, $delimiter);
