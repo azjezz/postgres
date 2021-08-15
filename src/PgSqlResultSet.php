@@ -96,7 +96,7 @@ final class PgSqlResultSet implements ResultSet
                 continue;
             }
 
-            $result[$column] = $this->cast($column, $result[$column]);
+            $result[$column] = $this->cast($this->fieldTypes[$column], $result[$column]);
         }
 
         return $this->currentRow = \array_combine($this->fieldNames, $result);
@@ -104,62 +104,41 @@ final class PgSqlResultSet implements ResultSet
 
     /**
      * @see https://github.com/postgres/postgres/blob/REL_14_STABLE/src/include/catalog/pg_type.dat for OID types.
+     * @see https://www.postgresql.org/docs/14/catalog-pg-type.html for pg_type catalog docs.
      *
-     * @param int $column
+     * @param int $oid
      * @param string $value
      *
      * @return array|bool|float|int Cast value.
      *
      * @throws ParseException
      */
-    private function cast(int $column, string $value)
+    private function cast(int $oid, string $value)
     {
-        $oid = $this->fieldTypes[$column];
+        [$type, $delimiter, $element] = $this->types[$oid] ?? ['S', ',', 0];
 
-        switch ($oid) {
-            case 16: // bool
+        switch ($type) {
+            case 'A': // Arrays
+                return $this->parser->parse($value, function (string $data) use ($element) {
+                    return $this->cast($element, $data);
+                }, $delimiter);
+
+            case 'B': // Binary
                 return $value === 't';
 
-            case 20: // int8
-            case 21: // int2
-            case 23: // int4
-            case 26: // oid
-            case 27: // tid
-            case 28: // xid
-                return (int) $value;
+            case 'N': // Numeric
+                switch ($oid) {
+                    case 700: // float4
+                    case 701: // float8
+                    case 790: // money
+                    case 1700: // numeric
+                        return (float) $value;
 
-            case 700: // real
-            case 701: // double-precision
-                return (float) $value;
-
-            case 1000: // boolean[]
-                return $this->parser->parse($value, function (string $value): bool {
-                    return $value === 't';
-                });
-
-            case 1005: // int2[]
-            case 1007: // int4[]
-            case 1010: // tid[]
-            case 1011: // xid[]
-            case 1016: // int8[]
-            case 1028: // oid[]
-                return $this->parser->parse($value, function (string $value): int {
-                    return (int) $value;
-                });
-
-            case 1021: // real[]
-            case 1022: // double-precision[]
-                return $this->parser->parse($value, function (string $value): float {
-                    return (float) $value;
-                });
-
-            default:
-                [$type, $delimiter] = $this->types[$oid] ?? ['S', ','];
-
-                if ($type === 'A') {
-                    return $this->parser->parse($value, null, $delimiter);
+                    default: // Cast all other numeric types to an integer.
+                        return (int) $value;
                 }
 
+            default: // Return all other types as strings.
                 return $value;
         }
     }

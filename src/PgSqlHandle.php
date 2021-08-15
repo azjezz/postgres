@@ -31,7 +31,7 @@ final class PgSqlHandle implements Handle
     ];
 
     /** @var array<string, Promise<array<int, array{string, string}>>> */
-    private static $type_cache;
+    private static $typeCache;
 
     /** @var resource PostgreSQL connection handle. */
     private $handle;
@@ -60,8 +60,9 @@ final class PgSqlHandle implements Handle
     /**
      * @param resource $handle PostgreSQL connection handle.
      * @param resource $socket PostgreSQL connection stream socket.
+     * @param string $id Connection identifier for determining which cached type table to use.
      */
-    public function __construct($handle, $socket)
+    public function __construct($handle, $socket, string $id = '')
     {
         $this->handle = $handle;
 
@@ -151,11 +152,10 @@ final class PgSqlHandle implements Handle
             }
         });
 
-        //Loop::disable($this->poll);
         Loop::unreference($this->poll);
         Loop::disable($this->await);
 
-        $this->types = $this->lookupTypesTable();
+        $this->types = $this->fetchTypes($id);
     }
 
     /**
@@ -166,43 +166,24 @@ final class PgSqlHandle implements Handle
         $this->close();
     }
 
-    private function lookupTypesTable(): Promise
+    private function fetchTypes(string $id): Promise
     {
-        return call(function (): \Generator {
+        if (isset(self::$typeCache)) {
+            return self::$typeCache[$id];
+        }
+
+        return self::$typeCache[$id] = call(function (): \Generator {
             $result = yield from $this->send(
                 "pg_send_query",
-                "SELECT CURRENT_USER, inet_server_addr(), inet_server_port()"
-            );
-
-            $row = \pg_fetch_array($result, null, \PGSQL_NUM);
-            if ($row === false) {
-                $this->close();
-                throw new ConnectionException("Could not query connection metadata");
-            }
-
-            [$user, $host, $port] = $row;
-            $hash = \sha1($user . $host . $port);
-
-            if (isset(self::$type_cache[$hash])) {
-                return self::$type_cache[$hash];
-            }
-
-            return (self::$type_cache[$hash] = $this->fetchTypesTable());
-        });
-    }
-
-    private function fetchTypesTable(): Promise
-    {
-        return call(function (): \Generator {
-            $result = yield from $this->send(
-                "pg_send_query",
-                "SELECT oid, typcategory, typdelim FROM pg_catalog.pg_type"
+                "SELECT t.oid, t.typcategory, t.typdelim, t.typelem
+                 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON t.typnamespace=n.oid
+                 WHERE t.typisdefined AND n.nspname IN ('pg_catalog', 'public')"
             );
 
             $types = [];
             while ($row = \pg_fetch_array($result, null, \PGSQL_NUM)) {
-                [$oid, $type, $delimiter] = $row;
-                $types[(int) $oid] = [$type, $delimiter];
+                [$oid, $type, $delimiter, $element] = $row;
+                $types[(int) $oid] = [$type, $delimiter, (int) $element];
             }
             return $types;
         });
